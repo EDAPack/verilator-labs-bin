@@ -1,12 +1,14 @@
 package:
   name: verilator-labs-bin
-  default-dep-set: dev
+  default-dep-set: default-dev
 
   dep-sets:
-  - name: use
+  - name: default
     deps: []
-  - name: dev
-    uses: use
+  # Named default-dev, as in verilator-bin: deps without a dep-set inherit this
+  # name, and dv-flow-mgr / pytest-dfm declare default-dev but not dev.
+  - name: default-dev
+    uses: default
     deps:
     # The labs fork, for labs.py (integration work). CI's `ivpm update -a`
     # fetches it too; the build itself clones the resolved SHA separately.
