@@ -98,8 +98,9 @@ fi
 # Built before Verilator, with the same toolchain, into the prefix Verilator's
 # configure gets as --with-dv-solve. The prefix ships in the tarball: models
 # built with --solver-dvs link its static runtime from $(DV_SOLVE_ROOT).
-# A platform where dv-solve does not build ships without it (Windows is the
-# likely one); Linux and macOS must build it.
+# A platform where dv-solve builds no static runtime ships without it: Windows
+# and macOS (dv-solve's libdv_solve.a needs GNU ld and objcopy). Linux must
+# build it.
 release_root="$WORK_DIR/release/verilator"
 build_dir="$WORK_DIR/build"
 rm -rf "$release_root" "$build_dir"
@@ -134,8 +135,7 @@ build_dv_solve() {
     find "$dvs_prefix" \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \
         -o -name '*.dll' -o -name '*.dll.a' \) -delete
     rm -rf "$dvs_prefix/bin" "$dvs_prefix"/lib*/cmake
-    [ -f "$dvs_prefix/lib/pkgconfig/dv-solve-writer.pc" ] \
-        || [ -f "$dvs_prefix/lib64/pkgconfig/dv-solve-writer.pc" ]
+    [ -f "$dvs_prefix/lib/libdv_solve.a" ] || [ -f "$dvs_prefix/lib64/libdv_solve.a" ]
 }
 
 jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
@@ -145,7 +145,7 @@ jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 labs_configure_args=()
 if build_dv_solve; then
     labs_configure_args+=(--configure-arg="--with-dv-solve=$dvs_prefix")
-elif [ "$IS_WINDOWS" = "1" ]; then
+elif [ "$IS_WINDOWS" = "1" ] || [ "$os" = "Darwin" ]; then
     ec_log "WARNING: dv-solve did not build on $plat; shipping without --solver-dvs"
     rm -rf "$dvs_prefix"
     labs_configure_args+=(--omit=--with-dv-solve)
