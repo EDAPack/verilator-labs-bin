@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://dv-flow.github.com/dv.flow.schema.json
+#
+# Exercises the shipped UVM + its Verilator DPI layer through dv-flow-mgr,
+# the way a real user consumes them.
+#
+# One image, several tests selected with +UVM_TESTNAME: verilating UVM is the
+# expensive step, so each extra test costs seconds rather than minutes.
+
+package:
+  name: org.edapack.verilator-labs-bin.tests.uvm-dpi
+
+  imports:
+  - name: hdlsim.vlt
+
+  tasks:
+  - name: uvm
+    uses: hdlsim.vlt.SimLibUVM
+    with:
+      # Not "auto": if the DPI overlay is missing we want this test to FAIL,
+      # not to quietly fall back to glob-only regex matching and then fail
+      # later with a confusing regex mismatch.
+      dpi: "true"
+
+  - name: tb
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include: "uvm_dpi_tb.sv"
+
+  - name: build
+    uses: hdlsim.vlt.SimImage
+    needs: [uvm, tb]
+    with:
+      top: [uvm_dpi_tb]
+
+  # One run task per uvm_test. Keep the task names in sync with the TESTS
+  # list in run_dfm_test.sh, which checks each one's sim.log.
+  - name: run-dpi
+    uses: hdlsim.vlt.SimRun
+    needs: [build]
+    with:
+      plusargs: [UVM_TESTNAME=uvm_dpi_test]
+
+  - name: run-cfgdb
+    uses: hdlsim.vlt.SimRun
+    needs: [build]
+    with:
+      plusargs: [UVM_TESTNAME=uvm_cfgdb_test]
+
+  - name: run-factory
+    uses: hdlsim.vlt.SimRun
+    needs: [build]
+    with:
+      plusargs: [UVM_TESTNAME=uvm_factory_test]
+
+  # dpi_opt is the plusarg the command-line processor is asked to find; it
+  # reaches UVM only through uvm_svcmd_dpi.c.
+  - name: run-cmdline
+    uses: hdlsim.vlt.SimRun
+    needs: [build]
+    with:
+      plusargs: [UVM_TESTNAME=uvm_cmdline_test, dpi_opt=hello]
+
+  - name: run-reg
+    uses: hdlsim.vlt.SimRun
+    needs: [build]
+    with:
+      plusargs: [UVM_TESTNAME=uvm_reg_backdoor_test]
+
+  - name: run
+    uses: std.Null
+    needs: [run-dpi, run-cfgdb, run-factory, run-cmdline, run-reg]

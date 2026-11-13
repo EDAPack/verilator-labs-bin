@@ -1,0 +1,39 @@
+package:
+  name: verilator-labs-bin
+  default-dep-set: dev
+
+  dep-sets:
+  - name: use
+    deps: []
+  - name: dev
+    uses: use
+    deps:
+    # The labs fork, for labs.py (integration work). CI's `ivpm update -a`
+    # fetches it too; the build itself clones the resolved SHA separately.
+    - name: verilator
+      url: https://github.com/mballance/verilator.git
+    # From verilator-bin's default-dev: what CI and scripts/build.sh need.
+    # edapack-common is required: build-release.yml's resolve step and
+    # scripts/build.sh run its scripts from packages/edapack-common.
+    - name: edapack-common
+      url: https://github.com/edapack/edapack-common.git
+    - name: dv-flow-mgr
+      url: https://github.com/dv-flow/dv-flow-mgr.git
+    - name: dv-flow-libhdlsim
+      url: https://github.com/dv-flow/dv-flow-libhdlsim.git
+      # Not our dev set: sub-deps inherit it, and libhdlsim's default-dev
+      # pulls prebuilt verilator/iverilog/xezim, which have no macOS or aarch64
+      # assets for every target (and would fetch a released verilator into
+      # our build).
+      dep-set: default
+    # Declared here only so it resolves under our dev set: libhdlsim's
+    # `default` set names it without a dep-set, so it would inherit `default`,
+    # which pytest-dfm does not declare (fatal in ivpm 2.39).
+    - name: pytest-dfm
+      url: https://github.com/dv-flow/pytest-dfm.git
+    - name: pytest
+      src: pypi
+    - name: meson
+      src: pypi
+    - name: pyyaml
+      src: pypi

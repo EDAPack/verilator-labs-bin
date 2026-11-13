@@ -216,3 +216,18 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+packages/
+.vscode/
+.claude/
+.codex/
+.cursor/
+.agents/
+
+# From verilator-bin
+tmp/
+# edapack rootless build outputs
+.build/
+dist/
+# Test scratch directories
+tests/*/[_a-z]*_work/
+tests/smoke_test_work/

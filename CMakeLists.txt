@@ -1,0 +1,470 @@
+cmake_minimum_required(VERSION 3.15)
+project(verilator-labs-bin)
+
+include(ExternalProject)
+include(ProcessorCount)
+ProcessorCount(NPROC)
+
+# Check CMake version for DOWNLOAD_EXTRACT_TIMESTAMP support (added in 3.24)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+  set(EXTRACT_TIMESTAMP_ARG DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+else()
+  set(EXTRACT_TIMESTAMP_ARG "")
+endif()
+
+# Options to control build behavior
+option(USE_LATEST_BRANCH "Use latest main branch instead of tagged release" ON)
+set(VERILATOR_TAG "" CACHE STRING "Specific Verilator tag to use (overrides USE_LATEST_BRANCH)")
+set(BITWUZLA_TAG "" CACHE STRING "Specific Bitwuzla tag to use (overrides USE_LATEST_BRANCH)")
+# Verilator Labs: the core is the labs fork, not upstream (a labs source tag or
+# SHA does not exist upstream).
+set(VERILATOR_REPO "https://github.com/mballance/verilator.git" CACHE STRING "Verilator git repository")
+# Verilator Labs: extra Verilator configure flags, a ;-list. scripts/build.sh
+# fills it from topics.yaml (`labs.py configure-flags`).
+set(VERILATOR_EXTRA_CONFIGURE_ARGS "" CACHE STRING "Extra Verilator configure flags (;-list)")
+string(JOIN " " VERILATOR_EXTRA_CONFIGURE_STR ${VERILATOR_EXTRA_CONFIGURE_ARGS})
+message(STATUS "Verilator repo: ${VERILATOR_REPO}")
+message(STATUS "Verilator extra configure flags: ${VERILATOR_EXTRA_CONFIGURE_STR}")
+
+# Set install prefix if not specified
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Installation directory" FORCE)
+endif()
+
+# Detect Windows/MSYS2/Cygwin environment
+set(IS_MINGW FALSE)
+set(IS_CYGWIN FALSE)
+set(IS_WINDOWS FALSE)
+
+if(WIN32 OR MSYS OR CYGWIN)
+  set(IS_WINDOWS TRUE)
+  # Find bash for running configure scripts on Windows
+  find_program(BASH_EXECUTABLE bash REQUIRED)
+  message(STATUS "Using bash: ${BASH_EXECUTABLE}")
+  
+  # Detect if we're in MinGW or Cygwin
+  execute_process(
+    COMMAND ${BASH_EXECUTABLE} -c "uname -s"
+    OUTPUT_VARIABLE UNAME_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  
+  if(UNAME_OUTPUT MATCHES "MINGW" OR UNAME_OUTPUT MATCHES "MSYS")
+    set(IS_MINGW TRUE)
+    message(STATUS "Detected MinGW/MSYS environment")
+  elseif(UNAME_OUTPUT MATCHES "CYGWIN")
+    set(IS_CYGWIN TRUE)
+    message(STATUS "Detected Cygwin environment")
+  endif()
+endif()
+
+# Bitwuzla (Verilator's bundled SMT solver) is not built on MinGW: the
+# Windows build exists to test pyhdl-if, which needs no constraint solving,
+# and dropping it removes gmp/mpfr/meson/ninja from the Windows build. Without
+# it Verilator falls back to a solver found on PATH at run time.
+# See docs/design/windows.md (D9).
+if(IS_MINGW)
+  set(_with_bitwuzla_default OFF)
+else()
+  set(_with_bitwuzla_default ON)
+endif()
+option(WITH_BITWUZLA "Build Bitwuzla and configure Verilator with it" ${_with_bitwuzla_default})
+if(WITH_BITWUZLA)
+  set(VERILATOR_SOLVER_ARG "--with-solver=bitwuzla")
+  set(VERILATOR_DEPENDS_ARG DEPENDS bitwuzla)
+else()
+  set(VERILATOR_SOLVER_ARG "")
+  set(VERILATOR_DEPENDS_ARG "")
+endif()
+message(STATUS "WITH_BITWUZLA: ${WITH_BITWUZLA}")
+
+# Determine Bitwuzla version/branch
+if(BITWUZLA_TAG)
+  set(BITWUZLA_GIT_TAG ${BITWUZLA_TAG})
+elseif(USE_LATEST_BRANCH)
+  set(BITWUZLA_GIT_TAG "main")
+else()
+  # Will be set to latest release tag via environment variable or default
+  set(BITWUZLA_GIT_TAG "0.6.0")
+endif()
+
+# Determine Verilator version/branch
+if(VERILATOR_TAG)
+  set(VERILATOR_GIT_TAG ${VERILATOR_TAG})
+elseif(USE_LATEST_BRANCH)
+  set(VERILATOR_GIT_TAG "master")
+else()
+  # Will be set to latest release tag via environment variable or default
+  set(VERILATOR_GIT_TAG "v5.030")
+endif()
+
+message(STATUS "Building with Bitwuzla: ${BITWUZLA_GIT_TAG}")
+message(STATUS "Building with Verilator: ${VERILATOR_GIT_TAG}")
+
+if(WITH_BITWUZLA)
+# Create a Python virtual environment for meson/ninja
+if(IS_WINDOWS)
+  ExternalProject_Add(python-venv
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "python3 -m venv <BINARY_DIR>/venv || python -m venv <BINARY_DIR>/venv"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "export CFLAGS='-fno-lto' CXXFLAGS='-fno-lto' && <BINARY_DIR>/venv/bin/pip install meson ninja || <BINARY_DIR>/venv/Scripts/pip install meson ninja"
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+  )
+else()
+  ExternalProject_Add(python-venv
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND python3 -m venv <BINARY_DIR>/venv
+    BUILD_COMMAND <BINARY_DIR>/venv/bin/pip install meson ninja
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+  )
+endif()
+
+# Build GMP (required by MPFR and Bitwuzla)
+# Use local cached copy to avoid network issues
+# Build both static and shared libraries so meson can find them
+if(IS_MINGW)
+  # MinGW-specific: Use system-installed GMP from MSYS2 packages
+  # Building GMP from source on MinGW has long-standing reliability test issues
+  # We already install mingw-w64-*-gmp in the workflow
+  ExternalProject_Add(gmp
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Using system GMP from MSYS2"
+  )
+elseif(IS_CYGWIN)
+  # Cygwin-specific build
+  # Note: Cygwin has issues with jobserver semaphores when make is nested
+  # Use single-threaded make to avoid "invalid --jobserver-auth" errors
+  ExternalProject_Add(gmp
+    URL ${CMAKE_SOURCE_DIR}/deps/gmp-6.3.0.tar.xz
+    URL_HASH SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+    ${EXTRACT_TIMESTAMP_ARG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && ./configure --prefix=${CMAKE_INSTALL_PREFIX} --enable-cxx"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make install"
+    BUILD_IN_SOURCE 1
+  )
+else()
+  # Unix/Linux/macOS build
+  # For manylinux containers: Set gcc_cv_c_long_long_reliable_test to "yes" to skip the test
+  # This avoids the runtime test failures in containerized environments
+  ExternalProject_Add(gmp
+    URL ${CMAKE_SOURCE_DIR}/deps/gmp-6.3.0.tar.xz
+    URL_HASH SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+    ${EXTRACT_TIMESTAMP_ARG}
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env gcc_cv_c_long_long_reliable_test=yes <SOURCE_DIR>/configure --prefix=${CMAKE_INSTALL_PREFIX} --enable-cxx
+    BUILD_COMMAND make -j${NPROC}
+    INSTALL_COMMAND make install
+    BUILD_IN_SOURCE 1
+  )
+endif()
+
+# Build MPFR (required by Bitwuzla, depends on GMP)
+# Use local cached copy to avoid network issues
+# Build both static and shared libraries so meson can find them
+if(IS_MINGW)
+  # MinGW-specific: Use system-installed MPFR from MSYS2 packages  
+  # We already install mingw-w64-*-mpfr in the workflow
+  ExternalProject_Add(mpfr
+    DEPENDS gmp
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E echo "Using system MPFR from MSYS2"
+  )
+elseif(IS_CYGWIN)
+  # Cygwin-specific build
+  # Note: Cygwin has issues with jobserver semaphores when make is nested
+  # Use single-threaded make to avoid "invalid --jobserver-auth" errors
+  ExternalProject_Add(mpfr
+    DEPENDS gmp
+    URL ${CMAKE_SOURCE_DIR}/deps/mpfr-4.2.2.tar.xz
+    URL_HASH SHA256=b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
+    ${EXTRACT_TIMESTAMP_ARG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && ./configure --prefix=${CMAKE_INSTALL_PREFIX} --with-gmp=${CMAKE_INSTALL_PREFIX}"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make install"
+    BUILD_IN_SOURCE 1
+  )
+else()
+  # Unix/Linux/macOS build
+  ExternalProject_Add(mpfr
+    DEPENDS gmp
+    URL ${CMAKE_SOURCE_DIR}/deps/mpfr-4.2.2.tar.xz
+    URL_HASH SHA256=b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
+    ${EXTRACT_TIMESTAMP_ARG}
+    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${CMAKE_INSTALL_PREFIX} --with-gmp=${CMAKE_INSTALL_PREFIX}
+    BUILD_COMMAND make -j${NPROC}
+    INSTALL_COMMAND make install
+    BUILD_IN_SOURCE 1
+  )
+endif()
+
+# Build Bitwuzla
+# Use meson directly with --wrap-mode=nofallback to prevent fallback to wrap for GMP/MPFR
+# Pass pkg-config-path and native-file for proper library detection on macOS
+if(IS_MINGW)
+  # MinGW-specific: Use shared libraries and system GMP/MPFR
+  # GMP and MPFR are already installed from MSYS2 packages in /mingw64
+  ExternalProject_Add(bitwuzla
+    DEPENDS python-venv gmp mpfr
+    GIT_REPOSITORY https://github.com/bitwuzla/bitwuzla.git
+    GIT_TAG ${BITWUZLA_GIT_TAG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/Scripts:$PATH && meson setup <SOURCE_DIR>/build <SOURCE_DIR> --prefix=${CMAKE_INSTALL_PREFIX} -Dfpexp=false --default-library=shared"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR>/build && export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/Scripts:$PATH && meson compile"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR>/build && export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/Scripts:$PATH && meson install"
+    BUILD_IN_SOURCE 1
+  )
+elseif(IS_CYGWIN)
+  # Cygwin-specific build
+  ExternalProject_Add(bitwuzla
+    DEPENDS python-venv gmp mpfr
+    GIT_REPOSITORY https://github.com/bitwuzla/bitwuzla.git
+    GIT_TAG ${BITWUZLA_GIT_TAG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$PATH && export PKG_CONFIG_PATH=${CMAKE_INSTALL_PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH && meson setup <SOURCE_DIR>/build <SOURCE_DIR> --prefix=${CMAKE_INSTALL_PREFIX} -Dfpexp=false --default-library=shared --pkg-config-path=${CMAKE_INSTALL_PREFIX}/lib/pkgconfig"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR>/build && export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$PATH && meson compile"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR>/build && export PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$PATH && meson install"
+    BUILD_IN_SOURCE 1
+  )
+else()
+  # Unix/Linux/macOS build
+  ExternalProject_Add(bitwuzla
+    DEPENDS python-venv gmp mpfr
+    GIT_REPOSITORY https://github.com/bitwuzla/bitwuzla.git
+    GIT_TAG ${BITWUZLA_GIT_TAG}
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env 
+      PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$ENV{PATH}
+      PKG_CONFIG_PATH=${CMAKE_INSTALL_PREFIX}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}
+      LD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}
+      DYLD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{DYLD_LIBRARY_PATH}
+      LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{LIBRARY_PATH}
+      meson setup <SOURCE_DIR>/build <SOURCE_DIR> 
+        --prefix=${CMAKE_INSTALL_PREFIX} 
+        -Dfpexp=false 
+        --default-library=shared
+        --pkg-config-path=${CMAKE_INSTALL_PREFIX}/lib/pkgconfig
+        -Dc_args=-I${CMAKE_INSTALL_PREFIX}/include
+        -Dcpp_args=-I${CMAKE_INSTALL_PREFIX}/include
+        -Dc_link_args=-L${CMAKE_INSTALL_PREFIX}/lib
+        -Dcpp_link_args=-L${CMAKE_INSTALL_PREFIX}/lib
+    BUILD_COMMAND ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>/build ${CMAKE_COMMAND} -E env 
+      PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$ENV{PATH}
+      LD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}
+      DYLD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{DYLD_LIBRARY_PATH}
+      meson compile
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>/build ${CMAKE_COMMAND} -E env 
+      PATH=${CMAKE_BINARY_DIR}/python-venv-prefix/src/python-venv/venv/bin:$ENV{PATH}
+      LD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}
+      DYLD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:$ENV{DYLD_LIBRARY_PATH}
+      meson install
+    BUILD_IN_SOURCE 1
+  )
+endif()
+
+endif() # WITH_BITWUZLA
+
+# Build Verilator
+if(IS_MINGW)
+  # MinGW-specific build
+  #
+  # CXXFLAGS=-std=gnu++17 for the same reason as the Unix branch below.
+  #
+  # LDFLAGS=-static links libstdc++/libgcc/winpthread into verilator_bin.exe,
+  # so bin/ ships no runtime DLLs. A bundled libstdc++-6.dll on PATH would be
+  # loaded by the user's own simv.exe in place of their toolchain's, and fail
+  # with "entry point not found". Both go on the build, not configure (see the
+  # Unix branch): src/Makefile_obj.in appends to the environment values.
+  ExternalProject_Add(verilator
+    ${VERILATOR_DEPENDS_ARG}
+    GIT_REPOSITORY ${VERILATOR_REPO}
+    GIT_TAG ${VERILATOR_GIT_TAG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && autoconf && ./configure --prefix=${CMAKE_INSTALL_PREFIX} ${VERILATOR_SOLVER_ARG} ${VERILATOR_EXTRA_CONFIGURE_STR}"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && CXXFLAGS=-std=gnu++17 LDFLAGS=-static make -j${NPROC}"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make install"
+    BUILD_IN_SOURCE 1
+  )
+elseif(IS_CYGWIN)
+  # Cygwin-specific build
+  # Note: Cygwin has issues with jobserver semaphores when make is nested
+  # Use single-threaded make to avoid "invalid --jobserver-auth" errors
+  ExternalProject_Add(verilator
+    DEPENDS bitwuzla
+    GIT_REPOSITORY ${VERILATOR_REPO}
+    GIT_TAG ${VERILATOR_GIT_TAG}
+    CONFIGURE_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && autoconf && ./configure --prefix=${CMAKE_INSTALL_PREFIX} --with-solver=bitwuzla ${VERILATOR_EXTRA_CONFIGURE_STR}"
+    BUILD_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make"
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd <SOURCE_DIR> && make install"
+    BUILD_IN_SOURCE 1
+  )
+else()
+  # Unix/Linux/macOS build
+  #
+  # CXXFLAGS=-std=gnu++17 at build time: Verilator's configure only injects a
+  # -std= flag when the compiler cannot do C++14 by default, so on
+  # manylinux2014 (el7 / devtoolset-10, gcc 10, default gnu++14) Verilator's
+  # own sources build as C++14 while every newer image gets gnu++17 for free.
+  # Master then fails to link -- eg V3AssertNfa.cpp odr-uses `static constexpr
+  # int kDepthUnreachable`, which needs an out-of-line definition before C++17.
+  # gnu++17 is the newest standard Verilator regularly tests, and is already
+  # what every other compiler we build with ends up using, so this only changes
+  # manylinux2014.
+  #
+  # It must go on the build, not on configure: that -std= probe keys off
+  # whether CXXFLAGS already suffices, and its answer also decides
+  # CFG_CXXFLAGS_STD, which is what include/verilated.mk.in passes to generated
+  # models. Setting CXXFLAGS for configure makes the probe succeed, blanking
+  # CFG_CXXFLAGS_STD and leaving macOS models with no -std= at all. Passing it
+  # via the environment at build time instead leaves configure untouched:
+  # src/Makefile_obj.in does `CXXFLAGS += @CXXFLAGS@`, which appends to the
+  # environment value rather than replacing it, and only Verilator's own
+  # sources are compiled here.
+  ExternalProject_Add(verilator
+    DEPENDS bitwuzla
+    GIT_REPOSITORY ${VERILATOR_REPO}
+    GIT_TAG ${VERILATOR_GIT_TAG}
+    CONFIGURE_COMMAND autoconf COMMAND <SOURCE_DIR>/configure --prefix=${CMAKE_INSTALL_PREFIX} --with-solver=bitwuzla ${VERILATOR_EXTRA_CONFIGURE_ARGS}
+    BUILD_COMMAND ${CMAKE_COMMAND} -E env CXXFLAGS=-std=gnu++17 make -j${NPROC}
+    INSTALL_COMMAND make install
+    BUILD_IN_SOURCE 1
+  )
+endif()
+
+# Fetch and install UVM
+#
+# 1800.2-2020.3.2 (2026-08-10) is the first Accellera release to ship the
+# Verilator backend for uvm_hdl_* itself, which is why we are on it: before it,
+# verilator-bin had to overlay Verilator's test_regress copy to make uvm_dpi.cc
+# compile at all. See docs/design/uvm-dpi.md.
+#
+# Accellera's download URLs are not uniformly named -- older releases are
+# 'Accellera-<version>.tar.gz', 2020.3.2 is '<version>%20Release.gz' -- so the
+# URL is its own variable rather than being derived from the version.
+set(UVM_VERSION "1800.2-2020.3.2" CACHE STRING "Accellera UVM version to ship")
+set(UVM_URL "https://www.accellera.org/images/downloads/standards/uvm/1800.2-2020.3.2%20Release.gz"
+    CACHE STRING "Download URL for the Accellera UVM release named by UVM_VERSION")
+
+ExternalProject_Add(uvm
+  URL ${UVM_URL}
+  # The 2020.3.2 asset is a tarball served with a bare '.gz' name; give it a
+  # name CMake will recognize as one so it is extracted rather than just
+  # decompressed.
+  DOWNLOAD_NAME uvm-${UVM_VERSION}.tar.gz
+  ${EXTRACT_TIMESTAMP_ARG}
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_INSTALL_PREFIX}/share/uvm
+    COMMAND ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/src ${CMAKE_INSTALL_PREFIX}/share/uvm/src
+)
+
+# Prepare the installed UVM tree's DPI layer for Verilator: assert the backend
+# is present, apply the macOS <malloc.h> fix, and write the provenance file.
+#
+# This used to overlay Verilator's own copy of the DPI sources; as of 2020.3.2
+# Verilator's copy is byte-identical to Accellera's apart from the release
+# stamp, so there is nothing left to overlay -- only to check and record.
+ExternalProject_Add(uvm-dpi
+  DEPENDS uvm
+  DOWNLOAD_COMMAND ""
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  INSTALL_COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/prepare-uvm-dpi.sh
+          ${CMAKE_INSTALL_PREFIX}
+          ${UVM_VERSION}
+          ${UVM_URL}
+)
+
+# Post-install cleanup and modifications
+if(IS_WINDOWS)
+  ExternalProject_Add(post-install
+    DEPENDS verilator uvm uvm-dpi
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND 
+      ${CMAKE_COMMAND} -E echo "Running post-install cleanup..."
+      COMMAND ${BASH_EXECUTABLE} -c "test -f ${CMAKE_INSTALL_PREFIX}/bin/verilator_bin && strip ${CMAKE_INSTALL_PREFIX}/bin/* 2>/dev/null || true"
+      COMMAND ${BASH_EXECUTABLE} -c "test -d ${CMAKE_INSTALL_PREFIX}/share/verilator/bin && strip ${CMAKE_INSTALL_PREFIX}/share/verilator/bin/* 2>/dev/null || true"
+      COMMAND ${BASH_EXECUTABLE} -c "rm -f ${CMAKE_INSTALL_PREFIX}/share/verilator/bin/*_dbg 2>/dev/null || true"
+      # PYTHON3 ?= (not =): models run verilator_includer with it, and on a stock
+      # Windows machine `python3` may be the Microsoft Store stub. `?=` lets a
+      # PYTHON3 environment variable name the interpreter (docs/windows.md).
+      COMMAND ${BASH_EXECUTABLE} -c "sed -i 's%^PYTHON3 =.*$%PYTHON3 ?= python3%' ${CMAKE_INSTALL_PREFIX}/share/verilator/include/verilated.mk && grep -q '^PYTHON3 ?= python3' ${CMAKE_INSTALL_PREFIX}/share/verilator/include/verilated.mk"
+      # Models default to gnu++17. MSYS2's GCC 16.2 defaults to gnu++20, and at
+      # -Os (which verilated.mk uses for the runtime) leaves the std::string
+      # move constructor undefined at link time -- even for a trivial program,
+      # and with MSYS2's own verilator package too. gnu++17 links. Verilator's
+      # configure leaves CFG_CXXFLAGS_STD empty when the compiler's default
+      # already suffices, so pin it here. A user -CFLAGS -std= still wins.
+      COMMAND ${BASH_EXECUTABLE} -c "sed -i 's%^CFG_CXXFLAGS_STD =.*$%CFG_CXXFLAGS_STD = -std=gnu++17%' ${CMAKE_INSTALL_PREFIX}/share/verilator/include/verilated.mk && grep -q '^CFG_CXXFLAGS_STD = -std=gnu++17' ${CMAKE_INSTALL_PREFIX}/share/verilator/include/verilated.mk"
+      # A copy, not a symlink: a symlink does not survive extraction on a
+      # Windows machine without symlink privilege.
+      COMMAND ${CMAKE_COMMAND} -E echo "Creating include copy for Windows Verilator compatibility..."
+      COMMAND ${BASH_EXECUTABLE} -c "cd ${CMAKE_INSTALL_PREFIX} && rm -rf include && cp -r share/verilator/include include"
+      # verilator.cmd lets cmd, PowerShell and native Python (shutil.which,
+      # subprocess) run the extensionless Perl `verilator` script.
+      COMMAND ${BASH_EXECUTABLE} -c "cp -f ${CMAKE_SOURCE_DIR}/scripts/verilator.cmd ${CMAKE_INSTALL_PREFIX}/bin/verilator.cmd"
+      COMMAND ${CMAKE_COMMAND} -E echo "Copying Verilator helper scripts to bin directory..."
+      COMMAND ${BASH_EXECUTABLE} -c "cd ${CMAKE_INSTALL_PREFIX}/bin && cp -f ../share/verilator/bin/verilator_includer ../share/verilator/bin/verilator_ccache_report . 2>/dev/null || true"
+  )
+  
+  # Add smoke test to validate the installation
+  # On Windows with MSYS/MinGW, convert Windows path to Unix format to avoid : being treated as separator
+  ExternalProject_Add(smoke-test
+    DEPENDS post-install
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND ${BASH_EXECUTABLE} -c "cd ${CMAKE_SOURCE_DIR}/tests && PATH=$(${BASH_EXECUTABLE} -c 'cd ${CMAKE_INSTALL_PREFIX}/bin && pwd'):$PATH ./run_smoke_test.sh"
+  )
+
+  # The UVM DPI tests are not run on MinGW/Cygwin: uvm_dpi.h requires POSIX
+  # <regex.h>, which mingw-w64 does not ship. The DPI sources are still
+  # installed (they are just sources), so nothing is lost by shipping them.
+  message(STATUS "Skipping UVM DPI tests on Windows (no POSIX regex.h)")
+else()
+  ExternalProject_Add(post-install
+    DEPENDS verilator uvm uvm-dpi
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND
+      ${CMAKE_COMMAND} -E echo "Running post-install cleanup..."
+      COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/linux-post-install.sh
+              ${CMAKE_INSTALL_PREFIX} ${CMAKE_BINARY_DIR}
+  )
+  
+  # Add smoke test to validate the installation
+  ExternalProject_Add(smoke-test
+    DEPENDS post-install
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND bash -c "export PATH=${CMAKE_INSTALL_PREFIX}/bin:$PATH && ${CMAKE_SOURCE_DIR}/tests/run_smoke_test.sh"
+  )
+
+  # Validate that the shipped UVM's DPI layer actually compiles and works
+  # under Verilator. Guards against silently regressing to +define+UVM_NO_DPI,
+  # which downgrades UVM's uvm_re_match to glob-only matching.
+  ExternalProject_Add(uvm-dpi-test
+    DEPENDS post-install
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND bash -c "export PATH=${CMAKE_INSTALL_PREFIX}/bin:$PATH && ${CMAKE_SOURCE_DIR}/tests/uvm_dpi/run_uvm_dpi_test.sh"
+  )
+
+  # Validate the same thing through dv-flow-mgr / dv-flow-libhdlsim, ie the
+  # way the package is actually consumed. Covers UVM discovery from the
+  # installed layout and SimLibUVM's DPI wiring, not just raw verilator.
+  # Set VERILATOR_BIN_SKIP_DFM_TEST=1 for an offline build.
+  ExternalProject_Add(uvm-dpi-dfm-test
+    DEPENDS uvm-dpi-test
+    DOWNLOAD_COMMAND ""
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND bash -c "export PATH=${CMAKE_INSTALL_PREFIX}/bin:$PATH && ${CMAKE_SOURCE_DIR}/tests/uvm_dpi_dfm/run_dfm_test.sh"
+  )
+endif()

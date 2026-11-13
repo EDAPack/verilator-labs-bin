@@ -1,0 +1,47 @@
+# Input components for verilator-labs-bin, resolved by edapack-common's
+# resolve-inputs.py. See https://dvkit.org/edapack/ (Developer Guide → build-inputs)
+# and docs/plan/labs-release-plan.md (Release identity, dv-solve).
+#
+# Comments are kept in this header (not inline in the body) because the
+# published @v1 resolver's YAML parser neither strips trailing inline comments
+# nor skips comment lines when deciding a block's type.
+#   core verilator  - the labs fork. Releases are only ever built from an
+#                     explicit core_ref (the source tag, e.g.
+#                     v5.051-labs.2026.02), passed by release-tag.yml through
+#                     ci.yml. `policy` is required by the schema but unused:
+#                     there is no dev track here.
+#   release_policy  - required by the release track; the dispatch's core_ref
+#                     overrides it. The regex matches only labs source tags.
+#   version_probe   - kept from verilator-bin; harmless, the release version
+#                     comes from the core_ref tag name.
+#   release_notes   - none. The body comes from scripts/release-notes-hook.sh
+#                     (labs.py release-notes, from releases/<tag>.yaml).
+#   bitwuzla        - SMT solver for Verilator's default constraint path; kept
+#                     as in verilator-bin (latest-release, not branch:main:
+#                     newer bitwuzla needs GCC >= 11, beyond manylinux2014).
+#   dv-solve        - built and shipped for --solver-dvs (topic `dvs`). Pinned
+#                     to the commit that added the embeddable libraries
+#                     (52262e3, on main 2026-11-13) until a dv-solve tag
+#                     contains them; then switch to `latest-tag`. A dv-solve
+#                     bump is a labs change and is recorded in releases/.
+#   cadical         - dv-solve's CaDiCaL backend (not vendored by dv-solve);
+#                     same tag as dv-solve's ivpm.yaml.
+schema: edapack.build-inputs/1
+
+core:
+  name: verilator
+  repo: https://github.com/mballance/verilator
+  policy: branch:master
+  release_policy: 'latest-tag:^v\d+\.\d+-labs\.\d{4}\.\d{2}$'
+  version_probe: configure.ac:AC_INIT
+
+dependencies:
+  - name: bitwuzla
+    repo: https://github.com/bitwuzla/bitwuzla
+    policy: latest-release
+  - name: dv-solve
+    repo: https://github.com/fvutils/dv-solve
+    policy: tag:52262e3054f2fa3a25b4473e46662aa7f51308b8
+  - name: cadical
+    repo: https://github.com/arminbiere/cadical
+    policy: tag:rel-3.0.1

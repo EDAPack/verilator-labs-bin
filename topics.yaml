@@ -1,0 +1,25 @@
+# Topics carried by Verilator Labs, in merge order.
+# See docs/design/labs-release.md (Topic manifest). Check with:
+#   python3 scripts/labs.py validate
+#
+# Fields:
+#   name             short id, unique
+#   branch           full branch name on mballance/verilator (no naming convention)
+#   upstream         planned | labs-only | pr-open <url>
+#   impact           none | <what it costs when the feature is not enabled>
+#   enabled_by       the user-facing switch (for the release notes)
+#   configure        configure flags the recipe passes for this topic
+#   requires_inputs  build inputs the topic needs; must be in build-inputs.yaml
+#   depends_on       topics this one is stacked on; must come earlier in the list
+#   tests            test_regress names or globs for the topic's own tests
+#
+# Optional top level `cross_tests: [...]`: tests that turn on two topics at once.
+topics:
+  - name: dvs
+    branch: dvs-integ
+    upstream: planned
+    impact: none
+    enabled_by: --solver-dvs
+    configure: [--with-dv-solve]
+    requires_inputs: [dv-solve]
+    tests: [t_dvs_*, t_constraint_solver_cmake]

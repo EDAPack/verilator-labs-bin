@@ -1,0 +1,80 @@
+# Release trigger for Verilator Labs. See docs/design/labs-release.md
+# (How the release tag starts a release) and docs/plan/labs-release-plan.md
+# (Release identity, Step 4).
+#
+# A push of a release tag here (v<ver>-labs.<YYYY>.<NN>, or .<n> for a
+# packaging re-spin) starts a release. This workflow publishes NOTHING itself:
+#   1. `labs.py check-release` reads releases/<base-tag>.yaml from the tagged
+#      commit and checks that mballance/verilator has the source tag
+#      <base-tag> at the record's `head`. A missing or mismatched source tag
+#      stops here with a clear error.
+#   2. It dispatches ci.yml at the tag with core_ref=<base-tag> (plus
+#      revision/revision_note for a re-spin).
+#
+# RELEASE GATE. Publishing happens only in ci.yml's call to
+# edapack/edapack-common/.github/workflows/build-release.yml@v1, whose `gate`
+# job resolves the release-authority switch at
+# https://dvkit.org/.well-known/release-authority.json; its publish job
+# requires `authority == 'github'` and an event that is not a push. The
+# dispatch below is a workflow_dispatch event, so it may publish -- but only on
+# the forge that holds release authority, and the "already released?" check
+# (gh release view <tag>) means a tag mirrored to the other forge cannot
+# publish twice. On Forgejo this file does not run at all: .forgejo/workflows/
+# exists, so the runner does not fall back to .github/workflows/.
+name: Release tag
+
+on:
+  push:
+    tags: ['v*-labs.*']
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref }}
+        # Full history and tags; the repo is small.
+        fetch-depth: 0
+
+    - name: Fetch the annotated release tag
+      # A re-spin's note is its tag message, so the tag object (not just the
+      # commit it points at) must be present. Re-fetch it explicitly rather
+      # than rely on how actions/checkout materialises tags.
+      run: |
+        git fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+        if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != tag ]; then
+          echo "::error::${GITHUB_REF_NAME} is not an annotated tag; create it with 'labs.py release-tag'"
+          exit 1
+        fi
+
+    - name: Install PyYAML
+      # scripts/labs.py reads releases/*.yaml and topics.yaml with PyYAML.
+      run: |
+        python3 -c 'import yaml' 2>/dev/null && { echo "PyYAML already present"; exit 0; }
+        python3 -m pip install -q pyyaml && exit 0
+        python3 -m pip install -q --break-system-packages pyyaml && exit 0
+        echo "::error::could not install PyYAML"; exit 1
+
+    - name: Check the release tag against its source tag
+      id: check
+      run: python3 scripts/labs.py check-release "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+    - name: Dispatch the release build
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CORE_REF: ${{ steps.check.outputs.core_ref }}
+        REVISION: ${{ steps.check.outputs.revision }}
+        # Free text: passed through the environment, never spliced into the script.
+        REVISION_NOTE: ${{ steps.check.outputs.revision_note }}
+      run: |
+        [ -n "$CORE_REF" ] || { echo "::error::check-release gave no core_ref"; exit 1; }
+        args=(-f core_ref="$CORE_REF")
+        [ -n "$REVISION" ] && args+=(-f revision="$REVISION")
+        [ -n "$REVISION_NOTE" ] && args+=(-f revision_note="$REVISION_NOTE")
+        echo "gh workflow run ci.yml --ref $GITHUB_REF_NAME ${args[*]}"
+        gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" "${args[@]}"
