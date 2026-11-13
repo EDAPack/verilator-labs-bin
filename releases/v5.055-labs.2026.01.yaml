@@ -1,0 +1,22 @@
+# Written by scripts/labs.py record. Do not edit.
+tag: v5.055-labs.2026.01
+branch: labs/2026-01
+head: 7ce82b56b7b8d3b076306368c05e3656434eac62
+upstream:
+  ref: master
+  sha: d3b4783d2e0dc79c11dd6e94f3df00954f44f55b
+previous: null
+topics:
+- name: dvs
+  branch: dvs-integ
+  sha: 25567a0810a5fc73baf9acb8d0c88cf36ed4a5e4
+  merge: 7ce82b56b7b8d3b076306368c05e3656434eac62
+  upstream: planned
+  enabled_by: --solver-dvs
+glue: []
+test_gate:
+  upstream_suite: fail:2
+  topic_tests: pass
+  cross_tests: none
+  notes: 't_dist_lint_py: pylint/ruff not installed on build host (mypy clean); vltmt/t_func_inline_combine:
+    fails on upstream d3b4783d2 itself'
